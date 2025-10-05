@@ -285,8 +285,13 @@
 # Production on Render (Gunicorn -k eventlet). MQTT dùng paho.loop_start()
 # ================================================================================
 
-import eventlet
-eventlet.monkey_patch()
+# import eventlet
+# eventlet.monkey_patch()
+
+from gevent import monkey
+monkey.patch_all()
+
+from flask_socketio import SocketI
 
 from flask import Flask, render_template, request, jsonify, send_file
 from flask_socketio import SocketIO
@@ -297,7 +302,7 @@ from datetime import datetime, timezone
 from paho.mqtt.client import Client as PahoClient
 
 app = Flask(__name__)
-socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
+socketio = SocketIO(app, async_mode="gevent", cors_allowed_origins="*")
 
 # ---------------- MQTT (paho) ----------------
 MQTT_HOST = os.environ.get("MQTT_BROKER_URL", "test.mosquitto.org")

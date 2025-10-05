@@ -25,6 +25,9 @@ app.config['MQTT_BROKER_URL'] = os.environ.get('MQTT_BROKER_URL', 'broker.hivemq
 app.config['MQTT_BROKER_PORT'] = int(os.environ.get('MQTT_BROKER_PORT', '1883'))
 app.config['MQTT_KEEPALIVE']   = int(os.environ.get('MQTT_KEEPALIVE', '60'))
 app.config['MQTT_CLIENT_ID']   = os.environ.get('MQTT_CLIENT_ID', f'flask-{uuid.uuid4().hex[:8]}')
+app.config['MQTT_TLS_ENABLED'] = False
+app.config['MQTT_RECONNECT_DELAY'] = 5   # thử reconnect mỗi 5s
+
 
 mqtt = Mqtt(app)
 
@@ -119,6 +122,15 @@ def query_aggregated(range_key: str):
 # Initialize DB at import time (works under Gunicorn workers)
 init_db()
 
+@mqtt.on_disconnect()
+def on_mqtt_disconnect():
+    print("[MQTT] Disconnected. Will try to reconnect...")
+
+@mqtt.on_log()
+def on_mqtt_log(client, userdata, level, buf):
+    print("[MQTT-LOG]", buf)
+
+
 # ------------------------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------------------------
@@ -199,6 +211,25 @@ def emit_demo():
     save_row(demo["temp"], demo["hum"], demo["fan"])
     socketio.emit("update", demo)
     return "demo sent"
+
+@app.route("/mqtt_status")
+def mqtt_status():
+    try:
+        # Flask-MQTT giữ client trong thuộc tính .client
+        ok = getattr(mqtt, "client", None) is not None and mqtt.client.is_connected()
+    except Exception:
+        ok = False
+    return jsonify({"connected": bool(ok),
+                    "broker": app.config['MQTT_BROKER_URL'],
+                    "port": app.config['MQTT_BROKER_PORT']})
+
+@app.route("/mqtt_test_pub")
+def mqtt_test_pub():
+    try:
+        mqtt.publish(TOPIC_CMD, json.dumps({"ping": int(time.time())}))
+        return "published"
+    except Exception as e:
+        return f"publish failed: {e}", 500
 
 # ------------------------------------------------------------------------------
 # MQTT handlers

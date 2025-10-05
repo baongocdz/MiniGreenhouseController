@@ -300,7 +300,7 @@ app = Flask(__name__)
 socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
 
 # ---------------- MQTT (paho) ----------------
-MQTT_HOST = os.environ.get("MQTT_BROKER_URL", "broker.hivemq.com")
+MQTT_HOST = os.environ.get("MQTT_BROKER_URL", "test.mosquitto.org")
 MQTT_PORT = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
 MQTT_KEEPALIVE = int(os.environ.get("MQTT_KEEPALIVE", "60"))
 TOPIC_DATA = os.environ.get("MQTT_TOPIC_DATA", "greenhouse/data")

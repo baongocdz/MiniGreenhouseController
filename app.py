@@ -1,16 +1,35 @@
+# ============================================================
+# 🌿 Mini Greenhouse Controller – Flask + Socket.IO + MQTT (IPv6 Ready for Render)
+# ============================================================
+
 from flask import Flask, render_template, request, jsonify, send_file
 from flask_socketio import SocketIO
 import os, json, uuid, time, sqlite3
 from datetime import datetime, timezone
 
-# paho-mqtt
-from paho.mqtt.client import Client as PahoClient
+# --- MQTT (paho-mqtt) ---
+import socket
+import paho.mqtt.client as mqtt
 
+# ============================================================
+# ⚙️ Bắt buộc: ép MQTT dùng IPv6 (Render là IPv6-only)
+# ============================================================
+_orig_create_conn = socket.create_connection
+def _v6_create_conn(address, *args, **kwargs):
+    host, port = address
+    # ép family=AF_INET6 để tạo socket IPv6
+    return _orig_create_conn((host, port, 0, 0), *args, family=socket.AF_INET6)
+socket.create_connection = _v6_create_conn
+
+# ============================================================
+# 🌐 Flask & SocketIO setup
+# ============================================================
 app = Flask(__name__)
-# Dùng eventlet hoặc threading đều ok; eventlet cho realtime tốt hơn trên Render
 socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
 
-# ---------------- MQTT (paho) ----------------
+# ============================================================
+# 🔌 MQTT cấu hình
+# ============================================================
 MQTT_HOST = os.environ.get("MQTT_BROKER_URL", "test.mosquitto.org")
 MQTT_PORT = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
 MQTT_KEEPALIVE = int(os.environ.get("MQTT_KEEPALIVE", "60"))
@@ -18,10 +37,12 @@ TOPIC_DATA = os.environ.get("MQTT_TOPIC_DATA", "greenhouse/data")
 TOPIC_CMD  = os.environ.get("MQTT_TOPIC_CMD",  "greenhouse/cmd")
 
 mqtt_client_id = os.environ.get("MQTT_CLIENT_ID", f"flask-{uuid.uuid4().hex[:8]}")
-mqtt = PahoClient(client_id=mqtt_client_id, transport="tcp")
+mqtt = mqtt.Client(client_id=mqtt_client_id, transport="tcp")
 mqtt.reconnect_delay_set(min_delay=1, max_delay=60)
 
-# ---------------- App state ----------------
+# ============================================================
+# 🌡️ Trạng thái ứng dụng
+# ============================================================
 mode = "auto"
 fan_state = 0
 threshold_temp = 30.0
@@ -29,7 +50,9 @@ schedule_cfg = {"on_min": 5, "off_min": 10}
 last_data = None
 mqtt_connected = False
 
-# ---------------- SQLite ----------------
+# ============================================================
+# 🗄️ SQLite Database
+# ============================================================
 DB_PATH = os.path.join(os.path.dirname(__file__), "greenhouse.db")
 
 def db_conn():
@@ -82,12 +105,12 @@ def query_aggregated(range_key):
         hums.append(round(float(ah), 2))
     return {"time": times, "temp": temps, "hum": hums}
 
-# ---------------- Routes ----------------
+# ============================================================
+# 🌍 Flask Routes
+# ============================================================
 @app.route("/")
 def index():
-    # Nếu bạn có template dashboard.html thì mở cái này:
-    # return render_template("dashboard.html")
-    return "Mini Greenhouse online 🌿"
+    return "🌿 Mini Greenhouse online – Flask MQTT ready!"
 
 @app.route("/history")
 def history_api():
@@ -156,7 +179,6 @@ def emit_demo():
     socketio.emit("update", demo)
     return "demo sent"
 
-# ---- tiện kiểm tra nhanh ----
 @app.route("/mqtt_status")
 def mqtt_status():
     return jsonify({"connected": mqtt_connected, "broker": MQTT_HOST, "port": MQTT_PORT})
@@ -166,7 +188,9 @@ def mqtt_test_pub():
     mqtt.publish(TOPIC_CMD, json.dumps({"ping": int(time.time())}))
     return "published"
 
-# ---------------- paho callbacks ----------------
+# ============================================================
+# 📡 MQTT callbacks
+# ============================================================
 def on_mqtt_connect(client, userdata, flags, rc, properties=None):
     global mqtt_connected
     print(f"[MQTT] Connected rc={rc} -> host={MQTT_HOST}:{MQTT_PORT}")
@@ -195,20 +219,22 @@ def on_mqtt_disconnect(client, userdata, rc, properties=None):
     print(f"[MQTT] Disconnected rc={rc}. Reconnecting...")
 
 def on_mqtt_log(client, userdata, level, buf):
-    # Bật nếu cần soi kỹ: print("[MQTT-LOG]", buf)
-    pass
+    print("[MQTT-LOG]", buf)
 
-# ---------------- Socket.IO events ----------------
+# ============================================================
+# 🔌 Socket.IO events
+# ============================================================
 @socketio.on("connect")
 def on_ws_connect():
-    # Không dùng request.sid ở đây để tránh cảnh báo context
     if last_data:
         socketio.emit("update", last_data)
     socketio.emit("mode", mode)
     socketio.emit("threshold", threshold_temp)
     socketio.emit("schedule", schedule_cfg)
 
-# ---------------- Boot ----------------
+# ============================================================
+# 🚀 Boot
+# ============================================================
 init_db()
 mqtt.on_connect = on_mqtt_connect
 mqtt.on_message = on_mqtt_message

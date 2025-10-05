@@ -142,7 +142,8 @@
     const fmt = (v, d=1) => isNum(v) ? v.toFixed(d) : '--';
 
     // ------- socket
-    const socket = io();
+    // const socket = io();
+    const socket = io({ transports: ["websocket"] });
     const conn = byId('connState');
     socket.on('connect', ()=>{ conn.textContent='● Online'; conn.classList.add('on'); });
     socket.on('disconnect', ()=>{ conn.textContent='● Offline'; conn.classList.remove('on'); });

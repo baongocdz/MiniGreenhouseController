@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>🌿 Mini Greenhouse</title>
+
+  <!-- Icons + libs (không cần cài) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+
+  <style>
+    :root{
+      --bg1:#e0f7fa; --bg2:#f1faff;
+      --panel:#fff; --primary:#0284c7; --primary-dark:#0369a1; --primary-light:#7dd3fc;
+      --temp:#f59e0b; --hum:#0ea5e9; --ok:#22c55e; --danger:#ef4444;
+      --text:#1f2937; --muted:#94a3b8; --sub:#64748b; --border:#bae6fd;
+      --shadow-sm:0 4px 12px rgba(2,132,199,.08); --shadow-lg:0 10px 25px rgba(2,132,199,.12);
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:"Segoe UI",Tahoma,sans-serif;background:linear-gradient(135deg,var(--bg1),var(--bg2));color:var(--text);min-height:100vh}
+    .topbar{background:var(--panel);padding:20px 32px;display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid var(--border);position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(2,132,199,.06)}
+    .topbar h1{font-size:24px;font-weight:700;color:var(--primary);display:flex;gap:10px;align-items:center}
+    .status-dot{padding:6px 14px;border-radius:20px;font-weight:600;background:#f1f5f9;color:var(--muted);transition:.3s}
+    .status-dot.on{background:#dff6ff;color:var(--ok)}
+
+    .panel{background:var(--panel);border-radius:16px;max-width:960px;margin:24px auto;padding:28px;box-shadow:var(--shadow-sm);border:1px solid var(--border);transition:.3s}
+    .panel:hover{box-shadow:var(--shadow-lg)}
+    .panel h2{font-size:20px;font-weight:700;color:var(--primary);margin-bottom:18px;display:flex;gap:8px;align-items:center}
+    .panel h3{font-size:16px;font-weight:600;color:var(--sub);margin-bottom:10px;display:flex;gap:6px;align-items:center}
+
+    .highlight{display:flex;flex-wrap:wrap;gap:20px;justify-content:space-around;text-align:center}
+    .metric{flex:1;min-width:180px;padding:20px;background:linear-gradient(135deg,#f9fafb,#fff);border-radius:12px;border:2px solid var(--border);transition:.3s}
+    .metric:hover{transform:translateY(-3px);border-color:var(--primary-light)}
+    .metric .icon{font-size:44px;margin-bottom:8px}
+    .temp{color:var(--temp)} .hum{color:var(--hum)} .fan{color:var(--primary)}
+    .value{font-size:32px;font-weight:700;margin:6px 0}
+    .value.on{color:var(--ok)} .value.off{color:var(--danger)}
+    .label{font-size:13px;color:var(--muted);text-transform:uppercase}
+
+    .btn-group{display:flex;gap:10px;flex-wrap:wrap}
+    .btn{background:#fff;border:2px solid #e2e8f0;border-radius:8px;padding:10px 18px;cursor:pointer;font-size:14px;font-weight:600;flex:1;min-width:90px;transition:.2s}
+    .btn:hover{background:#f1f5f9;border-color:var(--primary-light)}
+    .btn.active{background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:#fff;border-color:var(--primary)}
+    .btn.ok{background:linear-gradient(135deg,var(--ok),#16a34a);color:#fff}
+    .btn.err{background:linear-gradient(135deg,var(--danger),#dc2626);color:#fff}
+    .btn.small{padding:6px 12px;font-size:13px;min-width:auto}
+    .subgroup{margin-top:16px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid var(--border)}
+    .inline{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+    label{font-size:13px;font-weight:600;color:var(--sub)}
+    input{padding:8px 14px;border:2px solid #e2e8f0;border-radius:6px;font-size:14px;text-align:center}
+    input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 2px rgba(2,132,199,.2)}
+    .hidden{display:none}
+
+    .chart-area{min-height:350px}
+    .chart-area .switcher{justify-content:flex-end;gap:6px;margin-bottom:10px}
+    .chart-area canvas{width:100%!important;height:260px!important}
+
+    .footer{text-align:center;font-size:13px;color:var(--muted);padding:20px 0}
+    @media (max-width:768px){.highlight{flex-direction:column}.inline{flex-direction:column;align-items:flex-start} input{width:100%}}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <h1><i class="fa-solid fa-seedling"></i> Mini Greenhouse</h1>
+    <div id="connState" class="status-dot">● Offline</div>
+  </header>
+
+  <section class="panel highlight">
+    <div class="metric">
+      <i class="fa-solid fa-temperature-half icon temp"></i>
+      <div class="value" id="t">--°C</div>
+      <div class="label">Temperature</div>
+    </div>
+    <div class="metric">
+      <i class="fa-solid fa-droplet icon hum"></i>
+      <div class="value" id="h">--%</div>
+      <div class="label">Humidity</div>
+    </div>
+    <div class="metric">
+      <i class="fa-solid fa-fan icon fan"></i>
+      <div class="value" id="f">OFF</div>
+      <div class="label" id="modeBadge">Mode: Auto</div>
+    </div>
+  </section>
+
+  <section class="panel controls">
+    <h2><i class="fa-solid fa-sliders"></i> Controls</h2>
+
+    <div class="btn-group mode">
+      <button id="btnAuto" class="btn active" onclick="setMode('auto')">Auto</button>
+      <button id="btnManual" class="btn" onclick="setMode('manual')">Manual</button>
+      <button id="btnSchedule" class="btn" onclick="setMode('schedule')">Schedule</button>
+    </div>
+
+    <div id="manualControl" class="subgroup hidden">
+      <h3><i class="fa-solid fa-fan"></i> Manual Fan</h3>
+      <div class="btn-group">
+        <button class="btn ok"  onclick="manualFan(1)">Turn ON</button>
+        <button class="btn err" onclick="manualFan(0)">Turn OFF</button>
+      </div>
+    </div>
+
+    <div class="subgroup">
+      <h3><i class="fa-solid fa-temperature-arrow-up"></i> Temperature to turn fan ON</h3>
+      <div class="inline">
+        <label for="th">Fan ON threshold (°C)</label>
+        <input id="th" type="number" min="10" max="50" step="0.5" value="30" placeholder="30.0" title="Temperature at which fan turns ON">
+        <button class="btn small" onclick="setThreshold()">Apply</button>
+      </div>
+    </div>
+
+    <div id="scheduleBox" class="subgroup hidden">
+      <h3><i class="fa-regular fa-clock"></i> Schedule</h3>
+      <div class="inline">
+        <label for="onMin">ON (min)</label>
+        <input id="onMin" type="number" min="1" max="120" value="5" placeholder="5" title="Minutes ON">
+        <label for="offMin">OFF (min)</label>
+        <input id="offMin" type="number" min="1" max="240" value="10" placeholder="10" title="Minutes OFF">
+        <button class="btn small" onclick="setSchedule()">Save</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel chart-area">
+    <h2><i class="fa-solid fa-chart-area"></i> Environment History</h2>
+    <div class="btn-group switcher">
+      <button class="btn small active" data-range="day">24h</button>
+      <button class="btn small" data-range="week">7d</button>
+      <button class="btn small" data-range="month">30d</button>
+    </div>
+    <canvas id="chart"></canvas>
+  </section>
+
+  <footer class="footer">🌿 Mini Greenhouse – Realtime Monitoring</footer>
+
+  <script>
+    // ------- helpers
+    const byId = id => document.getElementById(id);
+    const isNum = v => typeof v === 'number' && Number.isFinite(v);
+    const fmt = (v, d=1) => isNum(v) ? v.toFixed(d) : '--';
+
+    // ------- socket
+    const socket = io();
+    const conn = byId('connState');
+    socket.on('connect', ()=>{ conn.textContent='● Online'; conn.classList.add('on'); });
+    socket.on('disconnect', ()=>{ conn.textContent='● Offline'; conn.classList.remove('on'); });
+
+    socket.on('update', d=>{
+      byId('t').textContent = fmt(Number(d.temp)) + '°C';
+      byId('h').textContent = fmt(Number(d.hum)) + '%';
+
+      const f = byId('f');
+      const on = !!d.fan;
+      f.textContent = on ? 'ON' : 'OFF';
+      f.classList.toggle('on', on);
+      f.classList.toggle('off', !on);
+      // giữ class "value"
+      f.classList.add('value');
+    });
+
+    socket.on('mode', m=>{
+      ['btnAuto','btnManual','btnSchedule'].forEach(id=>byId(id).classList.remove('active'));
+      const btnId = 'btn' + m.charAt(0).toUpperCase() + m.slice(1);
+      if(byId(btnId)) byId(btnId).classList.add('active');
+
+      byId('modeBadge').textContent = 'Mode: ' + m;
+      byId('manualControl').classList.toggle('hidden', m !== 'manual');
+      byId('scheduleBox').classList.toggle('hidden', m !== 'schedule');
+    });
+
+    socket.on('threshold', v=>{
+      const n = Number(v);
+      if(isNum(n)) byId('th').value = n.toFixed(1);
+    });
+
+    socket.on('schedule', s=>{
+      if(!s) return;
+      if(isNum(Number(s.on_min)))  byId('onMin').value  = s.on_min;
+      if(isNum(Number(s.off_min))) byId('offMin').value = s.off_min;
+    });
+
+    // ------- REST actions
+    const post = (url, body)=>fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    async function setMode(m){ await post('/control',{mode:m}); }
+    async function manualFan(s){ await post('/control',{fan:s}); }
+    async function setThreshold(){
+      const v = Number(byId('th').value);
+      if(isNum(v)) await post('/threshold',{temp:v});
+    }
+    async function setSchedule(){
+      const on  = Number(byId('onMin').value || 5);
+      const off = Number(byId('offMin').value || 10);
+      await post('/schedule',{on_min:on, off_min:off});
+    }
+
+    // ------- chart
+    const ctx = byId('chart');
+    const chart = new Chart(ctx,{
+      type:'line',
+      data:{labels:[],datasets:[
+        {label:'Temperature', data:[], borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.15)', fill:true, tension:.35, pointRadius:2},
+        {label:'Humidity',    data:[], borderColor:'#0ea5e9', backgroundColor:'rgba(14,165,233,.15)', fill:true, tension:.35, pointRadius:2, yAxisID:'y1'}
+      ]},
+      options:{
+        responsive:true, maintainAspectRatio:false, interaction:{mode:'index', intersect:false},
+        scales:{
+          x:{ticks:{color:'#64748b'}, grid:{color:'rgba(0,0,0,.05)'}},
+          y:{title:{display:true,text:'°C'}, ticks:{color:'#64748b'}, grid:{color:'rgba(0,0,0,.05)'}},
+          y1:{position:'right', title:{display:true,text:'%'}, ticks:{color:'#64748b'}, grid:{drawOnChartArea:false}}
+        },
+        plugins:{legend:{labels:{color:'#1f2937', font:{size:12}}}, tooltip:{backgroundColor:'#0f172a',titleColor:'#fff',bodyColor:'#fff'}}
+      }
+    });
+
+    async function loadRange(r){
+      document.querySelectorAll('.switcher .btn').forEach(b=>b.classList.toggle('active', b.dataset.range===r));
+      const res = await fetch('/history?range='+r);
+      const data = await res.json();
+      chart.data.labels = Array.isArray(data.time) ? data.time : [];
+      chart.data.datasets[0].data = Array.isArray(data.temp) ? data.temp : [];
+      chart.data.datasets[1].data = Array.isArray(data.hum)  ? data.hum  : [];
+      chart.update();
+    }
+    document.querySelectorAll('.switcher .btn').forEach(b=>b.onclick=()=>loadRange(b.dataset.range));
+    loadRange('day');
+  </script>
+</body>
+</html>

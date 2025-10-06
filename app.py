@@ -231,3 +231,13 @@ def on_ws_connect():
     socketio.emit("schedule", schedule_cfg, to=sid)
 
 # (no __main__ block; Render runs via gunicorn)
+@app.get("/mqtt_diag")
+def mqtt_diag():
+    return jsonify({
+        "host": MQTT_HOST,
+        "port": MQTT_PORT,
+        "transport": os.getenv("MQTT_TRANSPORT","tcp"),
+        "path": os.getenv("MQTT_WS_PATH","/mqtt"),
+        "tls": os.getenv("MQTT_USE_TLS","false"),
+        "connected": mqtt_client.is_connected()
+    })

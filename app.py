@@ -166,7 +166,7 @@ def on_mqtt_message(client, userdata, msg):
     last_data = {"temp": t, "hum": h, "fan": f}
     last_rx_ts = int(time.time())                 # <= ghi nhận thời điểm có gói về
     save_row(t, h, f)
-    socketio.emit("update", last_data, broadcast=True)  # <= broadcast rõ ràng
+    socketio.emit("update")  # <= broadcast rõ ràng
     print(f"[DATA] temp={t}, hum={h}, fan={f}")   # tiện theo dõi log
 
 mqtt_client.on_connect    = on_mqtt_connect

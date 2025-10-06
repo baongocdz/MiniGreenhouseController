@@ -1,4 +1,3 @@
-# === MUST BE FIRST (không có dòng trống/ import nào phía trên) ===
 import eventlet
 eventlet.monkey_patch()
 

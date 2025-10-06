@@ -1,101 +1,86 @@
-# ============================================================
-# 🌿 Mini Greenhouse Controller – Flask + Socket.IO + MQTT (IPv6 Ready for Render)
+# ================= Mini Greenhouse on Render =================
+# Flask + Flask-SocketIO (eventlet) + paho-mqtt + SQLite
+# Gunicorn: -k eventlet -w 1
 # ============================================================
 
+import eventlet
+eventlet.monkey_patch()  # MUST be first
+
+import os, json, time, sqlite3, threading
+from datetime import datetime, timezone
 from flask import Flask, render_template, request, jsonify, send_file
 from flask_socketio import SocketIO
-import os, json, uuid, time, sqlite3
-from datetime import datetime, timezone
-
-# --- MQTT (paho-mqtt) ---
-import socket
 import paho.mqtt.client as mqtt
 
-# ============================================================
-# ⚙️ Bắt buộc: ép MQTT dùng IPv6 (Render là IPv6-only)
-# ============================================================
-_orig_create_conn = socket.create_connection
-def _v6_create_conn(address, *args, **kwargs):
-    host, port = address
-    # ép family=AF_INET6 để tạo socket IPv6
-    return _orig_create_conn((host, port, 0, 0), *args, family=socket.AF_INET6)
-socket.create_connection = _v6_create_conn
+# ------------------ ENV / CONFIG ------------------
+MQTT_HOST = os.getenv("MQTT_HOST", "test.mosquitto.org")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+TOPIC_DATA = os.getenv("TOPIC_DATA", "greenhouse/data")
+TOPIC_CMD  = os.getenv("TOPIC_CMD",  "greenhouse/cmd")
 
-# ============================================================
-# 🌐 Flask & SocketIO setup
-# ============================================================
+# Render free-file-system: dùng /tmp nếu không có persistent disk
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__) or ".", "greenhouse.db"))
+
 app = Flask(__name__)
 socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
 
-# ============================================================
-# 🔌 MQTT cấu hình
-# ============================================================
-MQTT_HOST = os.environ.get("MQTT_BROKER_URL", "test.mosquitto.org")
-MQTT_PORT = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
-MQTT_KEEPALIVE = int(os.environ.get("MQTT_KEEPALIVE", "60"))
-TOPIC_DATA = os.environ.get("MQTT_TOPIC_DATA", "greenhouse/data")
-TOPIC_CMD  = os.environ.get("MQTT_TOPIC_CMD",  "greenhouse/cmd")
-
-mqtt_client_id = os.environ.get("MQTT_CLIENT_ID", f"flask-{uuid.uuid4().hex[:8]}")
-mqtt = mqtt.Client(client_id=mqtt_client_id, transport="tcp")
-mqtt.reconnect_delay_set(min_delay=1, max_delay=60)
-
-# ============================================================
-# 🌡️ Trạng thái ứng dụng
-# ============================================================
+# ------------------ STATE ------------------
+state_lock = threading.Lock()
 mode = "auto"
 fan_state = 0
 threshold_temp = 30.0
 schedule_cfg = {"on_min": 5, "off_min": 10}
 last_data = None
-mqtt_connected = False
 
-# ============================================================
-# 🗄️ SQLite Database
-# ============================================================
-DB_PATH = os.path.join(os.path.dirname(__file__), "greenhouse.db")
-
+# ------------------ SQLite helpers ------------------
 def db_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def init_db():
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     with db_conn() as conn:
-        conn.execute("""
+        c = conn.cursor()
+        c.execute("""
         CREATE TABLE IF NOT EXISTS logs(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts INTEGER NOT NULL,
-            temp REAL NOT NULL,
-            hum REAL NOT NULL,
-            fan INTEGER NOT NULL
-        );
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);")
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts   INTEGER NOT NULL,   -- epoch seconds UTC
+            temp REAL    NOT NULL,
+            hum  REAL    NOT NULL,
+            fan  INTEGER NOT NULL
+        );""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);")
         conn.commit()
 
-def now_utc_ts(): return int(time.time())
-def iso_from_ts(ts): return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+def now_ts() -> int: return int(time.time())
+def iso_from_ts(ts: int) -> str: return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
-def save_row(temp, hum, fan):
+def save_row(temp: float, hum: float, fan: int):
     with db_conn() as conn:
         conn.execute("INSERT INTO logs(ts,temp,hum,fan) VALUES (?,?,?,?)",
-                     (now_utc_ts(), float(temp), float(hum), int(bool(fan))))
+                     (now_ts(), float(temp), float(hum), int(bool(fan))))
         conn.commit()
 
-def cutoff_ts(r):
-    now = now_utc_ts()
-    return now - (7*24*3600 if r=="week" else 30*24*3600 if r=="month" else 24*3600)
+def cutoff_ts(r: str) -> int:
+    now = now_ts()
+    if r == "week":  return now - 7*24*3600
+    if r == "month": return now - 30*24*3600
+    return now - 24*3600
 
-def bucket_seconds(r):
-    return 5*60 if r=="day" else 60*60 if r=="week" else 6*60*60
+def bucket_seconds(r: str) -> int:
+    if r == "day":   return 5*60
+    if r == "week":  return 60*60
+    if r == "month": return 6*60*60
+    return 5*60
 
-def query_aggregated(range_key):
-    after = cutoff_ts(range_key)
-    step  = bucket_seconds(range_key)
+def query_aggregated(r: str):
+    after = cutoff_ts(r)
+    step  = bucket_seconds(r)
     with db_conn() as conn:
         c = conn.cursor()
         c.execute(f"""
-        SELECT (CAST(ts/{step} AS INTEGER)*{step}) AS bucket, AVG(temp), AVG(hum)
-        FROM logs WHERE ts >= ? GROUP BY bucket ORDER BY bucket ASC;
+            SELECT (CAST(ts/{step} AS INTEGER)*{step}) AS bucket,
+                   AVG(temp) AS avg_t, AVG(hum) AS avg_h
+            FROM logs WHERE ts >= ? GROUP BY bucket ORDER BY bucket ASC;
         """, (after,))
         rows = c.fetchall()
     times, temps, hums = [], [], []
@@ -105,59 +90,91 @@ def query_aggregated(range_key):
         hums.append(round(float(ah), 2))
     return {"time": times, "temp": temps, "hum": hums}
 
-# ============================================================
-# 🌍 Flask Routes
-# ============================================================
+init_db()
+
+# ------------------ MQTT (paho) ------------------
+mqtt_client = mqtt.Client(client_id="greenhouse_render")  # dùng API v1 cho tương thích
+def mqtt_publish(obj: dict):
+    mqtt_client.publish(TOPIC_CMD, json.dumps(obj, ensure_ascii=False), qos=0, retain=False)
+
+def on_mqtt_connect(client, userdata, flags, rc):
+    print(f"[MQTT] Connected rc={rc} → sub {TOPIC_DATA}")
+    client.subscribe(TOPIC_DATA, qos=0)
+
+def on_mqtt_message(client, userdata, msg):
+    global last_data, fan_state
+    try:
+        data = json.loads(msg.payload.decode("utf-8"))
+        t = float(data.get("temp"))
+        h = float(data.get("hum"))
+        f = 1 if int(data.get("fan", 0)) else 0
+    except Exception as e:
+        print("[MQTT] Parse error:", e); return
+
+    fan_state = f
+    last_data = {"temp": t, "hum": h, "fan": f}
+    save_row(t, h, f)
+    socketio.emit("update", last_data)
+
+mqtt_client.on_connect = on_mqtt_connect
+mqtt_client.on_message = on_mqtt_message
+# Kết nối và start loop ngay khi import (phù hợp 1 worker)
+def _start_mqtt():
+    try:
+        mqtt_client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
+        mqtt_client.loop_start()
+        print(f"[MQTT] connecting to {MQTT_HOST}:{MQTT_PORT} ...")
+    except Exception as e:
+        print("[MQTT] connect failed:", e)
+_start_mqtt()
+
+# ------------------ Routes ------------------
 @app.route("/")
 def index():
-    return "🌿 Mini Greenhouse online – Flask MQTT ready!"
+    return render_template("dashboard.html")
 
-@app.route("/history")
+@app.get("/history")
 def history_api():
-    r = request.args.get("range","day")
+    r = request.args.get("range", "day")
     return jsonify(query_aggregated(r))
 
-@app.route("/export.csv")
-def export_csv():
-    p = os.path.join(os.path.dirname(__file__), "export.csv")
-    with db_conn() as conn, open(p, "w", encoding="utf-8") as f:
-        f.write("timestamp_utc,temp,hum,fan\n")
-        for ts, t, h, fan in conn.execute("SELECT ts,temp,hum,fan FROM logs ORDER BY ts"):
-            f.write(f"{iso_from_ts(ts)},{t},{h},{fan}\n")
-    return send_file(p, as_attachment=True, download_name="greenhouse.csv")
-
-@app.route("/control", methods=["POST"])
+@app.post("/control")
 def control():
     global mode, fan_state
     body = request.get_json(silent=True) or {}
-    if "mode" in body:
-        mode = str(body["mode"])
-        socketio.emit("mode", mode)
-        mqtt.publish(TOPIC_CMD, json.dumps({"mode": mode}))
-        print(f"[CMD] mode -> {mode}")
-    if "fan" in body:
-        if mode != "manual":
-            mode = "manual"
+    with state_lock:
+        if "mode" in body:
+            mode = str(body["mode"]).lower()
+            if mode not in ("auto","manual","schedule"):
+                mode = "auto"
             socketio.emit("mode", mode)
-            mqtt.publish(TOPIC_CMD, json.dumps({"mode": mode}))
-            print("[CMD] force manual before fan")
-        fan_state = int(body["fan"])
-        mqtt.publish(TOPIC_CMD, json.dumps({"fan": fan_state}))
-        print(f"[CMD] fan -> {fan_state}")
+            mqtt_publish({"mode": mode})
+            print(f"[CMD] mode -> {mode}")
+        if "fan" in body:
+            if mode != "manual":
+                mode = "manual"
+                socketio.emit("mode", mode)
+                mqtt_publish({"mode": "manual"})
+                print("[CMD] force manual before fan")
+            fan_state = 1 if int(body["fan"]) else 0
+            mqtt_publish({"fan": bool(fan_state)})
+            print(f"[CMD] fan -> {fan_state}")
     return jsonify({"ok": True, "mode": mode, "fan": fan_state})
 
-@app.route("/threshold", methods=["POST"])
+@app.post("/threshold")
 def set_threshold():
     global threshold_temp
     body = request.get_json(silent=True) or {}
-    try: threshold_temp = float(body.get("temp", threshold_temp))
-    except: pass
+    try:
+        threshold_temp = float(body.get("temp", threshold_temp))
+    except Exception:
+        pass
     socketio.emit("threshold", threshold_temp)
-    mqtt.publish(TOPIC_CMD, json.dumps({"temp": threshold_temp}))
+    mqtt_publish({"temp": threshold_temp})
     print(f"[CMD] threshold -> {threshold_temp}")
     return jsonify({"ok": True, "threshold": threshold_temp})
 
-@app.route("/schedule", methods=["POST"])
+@app.post("/schedule")
 def set_schedule():
     global schedule_cfg
     body = request.get_json(silent=True) or {}
@@ -165,86 +182,29 @@ def set_schedule():
         on_min  = int(body.get("on_min",  schedule_cfg["on_min"]))
         off_min = int(body.get("off_min", schedule_cfg["off_min"]))
         schedule_cfg = {"on_min": on_min, "off_min": off_min}
-    except: pass
+    except Exception:
+        pass
     socketio.emit("schedule", schedule_cfg)
-    mqtt.publish(TOPIC_CMD, json.dumps({"schedule": schedule_cfg}))
+    mqtt_publish({"mode": "schedule", **schedule_cfg})
     print(f"[CMD] schedule -> {schedule_cfg}")
     return jsonify({"ok": True, **schedule_cfg})
 
-@app.route("/emit_demo")
-def emit_demo():
-    demo = {"temp": 29.4, "hum": 62.1, "fan": 1}
-    global last_data; last_data = demo
-    save_row(demo["temp"], demo["hum"], demo["fan"])
-    socketio.emit("update", demo)
-    return "demo sent"
+@app.get("/export.csv")
+def export_csv():
+    tmp = os.path.join(os.path.dirname(__file__) or ".", "export.csv")
+    with db_conn() as conn, open(tmp, "w", encoding="utf-8") as f:
+        c = conn.cursor()
+        f.write("timestamp_utc,temp,hum,fan\n")
+        for ts, temp, hum, fan in c.execute("SELECT ts,temp,hum,fan FROM logs ORDER BY ts ASC"):
+            f.write(f"{iso_from_ts(ts)},{temp},{hum},{fan}\n")
+    return send_file(tmp, as_attachment=True, download_name="greenhouse.csv")
 
-@app.route("/mqtt_status")
-def mqtt_status():
-    return jsonify({"connected": mqtt_connected, "broker": MQTT_HOST, "port": MQTT_PORT})
-
-@app.route("/mqtt_test_pub")
-def mqtt_test_pub():
-    mqtt.publish(TOPIC_CMD, json.dumps({"ping": int(time.time())}))
-    return "published"
-
-# ============================================================
-# 📡 MQTT callbacks
-# ============================================================
-def on_mqtt_connect(client, userdata, flags, rc, properties=None):
-    global mqtt_connected
-    print(f"[MQTT] Connected rc={rc} -> host={MQTT_HOST}:{MQTT_PORT}")
-    mqtt_connected = (rc == 0)
-    client.subscribe(TOPIC_DATA)
-    print(f"[MQTT] Subscribed {TOPIC_DATA}")
-
-def on_mqtt_message(client, userdata, msg):
-    global fan_state, last_data
-    try:
-        data = json.loads(msg.payload.decode())
-        t = float(data.get("temp"))
-        h = float(data.get("hum"))
-        f = 1 if int(data.get("fan", 0)) else 0
-    except Exception as e:
-        print("[MQTT] Bad payload:", e)
-        return
-    fan_state = f
-    last_data = {"temp": t, "hum": h, "fan": f}
-    save_row(t, h, f)
-    socketio.emit("update", last_data)
-
-def on_mqtt_disconnect(client, userdata, rc, properties=None):
-    global mqtt_connected
-    mqtt_connected = False
-    print(f"[MQTT] Disconnected rc={rc}. Reconnecting...")
-
-def on_mqtt_log(client, userdata, level, buf):
-    print("[MQTT-LOG]", buf)
-
-# ============================================================
-# 🔌 Socket.IO events
-# ============================================================
+# ------------------ Socket.IO ------------------
 @socketio.on("connect")
 def on_ws_connect():
-    if last_data:
-        socketio.emit("update", last_data)
-    socketio.emit("mode", mode)
-    socketio.emit("threshold", threshold_temp)
-    socketio.emit("schedule", schedule_cfg)
-
-# ============================================================
-# 🚀 Boot
-# ============================================================
-init_db()
-mqtt.on_connect = on_mqtt_connect
-mqtt.on_message = on_mqtt_message
-mqtt.on_disconnect = on_mqtt_disconnect
-mqtt.on_log = on_mqtt_log
-print(f"[MQTT] Connecting to {MQTT_HOST}:{MQTT_PORT} ...")
-mqtt.connect_async(MQTT_HOST, MQTT_PORT, MQTT_KEEPALIVE)
-mqtt.loop_start()  # chạy nền
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"[APP] http://localhost:{port}")
-    socketio.run(app, host="0.0.0.0", port=port)
+    sid = request.sid
+    print("[WS] client", sid, "connected")
+    if last_data: socketio.emit("update", last_data, to=sid)
+    socketio.emit("mode", mode, to=sid)
+    socketio.emit("threshold", threshold_temp, to=sid)
+    socketio.emit("schedule", schedule_cfg, to=sid)

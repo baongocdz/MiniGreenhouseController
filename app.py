@@ -12,6 +12,37 @@ from flask import Flask, render_template, request, jsonify, send_file
 from flask_socketio import SocketIO
 import paho.mqtt.client as mqtt
 
+# ngay sau các import còn lại
+import socket
+
+def resolve_ipv4(host: str) -> str:
+    # Lấy địa chỉ IPv4 đầu tiên, tránh IPv6
+    for fam, _, _, _, sockaddr in socket.getaddrinfo(host, None):
+        if fam == socket.AF_INET:
+            return sockaddr[0]
+    return host  # fallback
+
+MQTT_HOST = os.getenv("MQTT_HOST", "test.mosquitto.org")
+MQTT_HOST_IP = resolve_ipv4(MQTT_HOST)
+
+mqtt_client = mqtt.Client(client_id="greenhouse_render")
+
+def on_mqtt_log(client, userdata, level, buf):
+    print("[MQTT-LOG]", buf)
+
+mqtt_client.on_log = on_mqtt_log
+mqtt_client.on_connect = on_mqtt_connect
+mqtt_client.on_message = on_mqtt_message
+
+def _start_mqtt():
+    try:
+        print(f"[MQTT] connecting to {MQTT_HOST} ({MQTT_HOST_IP}):{MQTT_PORT} ...")
+        mqtt_client.connect(MQTT_HOST_IP, MQTT_PORT, keepalive=30)
+        mqtt_client.loop_start()
+    except Exception as e:
+        print("[MQTT] connect failed:", e)
+
+
 # ------------------ ENV / CONFIG ------------------
 MQTT_HOST = os.getenv("MQTT_HOST", "test.mosquitto.org")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))

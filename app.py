@@ -104,22 +104,30 @@ def vacuum_and_ttl(days=TTL_DAYS):
     except Exception as e:
         print("[DB] TTL/VACUUM error:", e)
 
-# ------------------ MQTT (WS/TCP selectable) ------------------
-MQTT_TRANSPORT = os.getenv("MQTT_TRANSPORT", "tcp").lower()   # "tcp" | "websockets" | "ws" | "wss"
+# ------------------ MQTT (WS/TCP selectable + TLS + Origin header) ------------------
+MQTT_TRANSPORT = os.getenv("MQTT_TRANSPORT", "tcp").lower()   # tcp|websockets|ws|wss
 MQTT_USE_TLS   = os.getenv("MQTT_USE_TLS", "false").lower() == "true"
-MQTT_WS_PATH   = os.getenv("MQTT_WS_PATH", "/mqtt")            # hầu hết broker WS dùng "/mqtt"
+MQTT_WS_PATH   = os.getenv("MQTT_WS_PATH", "/mqtt")
+MQTT_TLS_INSECURE = os.getenv("MQTT_TLS_INSECURE", "false").lower() == "true"
+WS_ORIGIN      = os.getenv("WS_ORIGIN", "")  # ví dụ: https://minigreenhousecontroller-1.onrender.com
 
 def make_client():
     cid = os.getenv("MQTT_CLIENT_ID", f"greenhouse_web_{int(time.time())}")
     if MQTT_TRANSPORT in ("websockets", "ws", "wss"):
-        c = mqtt.Client(client_id=cid, transport="websockets")
-        c.ws_set_options(path=MQTT_WS_PATH or "/mqtt")
+        c = mqtt.Client(client_id=cid, transport="websockets")  # MQTT v3.1.1
+        # Thêm Origin header cho WS phía public broker/proxy khó tính
+        headers = {}
+        if WS_ORIGIN:
+            headers["Origin"] = WS_ORIGIN
+        c.ws_set_options(path=MQTT_WS_PATH or "/mqtt", headers=headers)
         if MQTT_USE_TLS or MQTT_TRANSPORT == "wss":
-            c.tls_set()  # WSS
-        # Với WS/WSS nên dùng hostname để SNI hoạt động
+            c.tls_set()                         # dùng CA hệ thống
+            if MQTT_TLS_INSECURE:
+                c.tls_insecure_set(True)        # chỉ bật nếu gặp lỗi verify cert
+        # WS/WSS: dùng hostname để SNI/Host header đúng
         return c, MQTT_HOST, MQTT_PORT
     else:
-        # TCP thường: dùng IPv4 để tránh IPv6 issues
+        # TCP: ưu tiên IPv4 để tránh IPv6
         return mqtt.Client(client_id=cid), MQTT_HOST_IP, MQTT_PORT
 
 mqtt_client, CONNECT_HOST, CONNECT_PORT = make_client()
@@ -148,11 +156,12 @@ def on_mqtt_message(client, userdata, msg):
 mqtt_client.on_connect = on_mqtt_connect
 mqtt_client.on_message = on_mqtt_message
 mqtt_client.on_log     = on_mqtt_log
+mqtt_client.reconnect_delay_set(min_delay=2, max_delay=10)
 
 _connecting_lock = threading.Lock()
 def connect_mqtt():
     with _connecting_lock:
-        print(f"[MQTT] Connecting via {MQTT_TRANSPORT.upper()} to {CONNECT_HOST}:{CONNECT_PORT} path={MQTT_WS_PATH if MQTT_TRANSPORT!='tcp' else '-'} TLS={MQTT_USE_TLS}")
+        print(f"[MQTT] Connecting via {MQTT_TRANSPORT.upper()} to {CONNECT_HOST}:{CONNECT_PORT} path={MQTT_WS_PATH if MQTT_TRANSPORT!='tcp' else '-'} TLS={MQTT_USE_TLS} ORIGIN={WS_ORIGIN or '-'}")
         mqtt_client.connect(CONNECT_HOST, CONNECT_PORT, keepalive=30)
         mqtt_client.loop_start()
 
@@ -167,6 +176,7 @@ def mqtt_watch():
 
 connect_mqtt()
 threading.Thread(target=mqtt_watch, daemon=True).start()
+
 
 # ------------------ Routes ------------------
 @app.route("/")

@@ -16,8 +16,9 @@ DB_PATH    = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__) or ".",
 TTL_DAYS   = int(os.getenv("TTL_DAYS", "14"))
 
 # NEW: auth từ ENV (EMQX Cloud cần)
-MQTT_USERNAME = os.getenv("MQTT_USERNAME")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
+MQTT_USERNAME = os.getenv("MQTT_USERNAME") or os.getenv("MQTT_USER")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD") or os.getenv("MQTT_PASS")
+
 
 def resolve_ipv4(host: str) -> str:
     try:
@@ -41,6 +42,7 @@ fan_state = 0
 threshold_temp = 30.0
 schedule_cfg = {"on_min": 5, "off_min": 10}
 last_data = None
+last_rx_ts = 0  # <= thêm dòng này
 
 # ------------------ SQLite helpers ------------------
 def db_conn():
@@ -154,7 +156,7 @@ def on_mqtt_disconnect(client, userdata, rc):
     print(f"[MQTT] Disconnected rc={rc}")
 
 def on_mqtt_message(client, userdata, msg):
-    global last_data, fan_state
+    global last_data, fan_state, last_rx_ts
     try:
         data = json.loads(msg.payload.decode("utf-8"))
         t = float(data.get("temp")); h = float(data.get("hum")); f = 1 if int(data.get("fan", 0)) else 0
@@ -162,8 +164,10 @@ def on_mqtt_message(client, userdata, msg):
         print("[MQTT] Parse error:", e, msg.payload[:100]); return
     fan_state = f
     last_data = {"temp": t, "hum": h, "fan": f}
+    last_rx_ts = int(time.time())                 # <= ghi nhận thời điểm có gói về
     save_row(t, h, f)
-    socketio.emit("update", last_data)
+    socketio.emit("update", last_data, broadcast=True)  # <= broadcast rõ ràng
+    print(f"[DATA] temp={t}, hum={h}, fan={f}")   # tiện theo dõi log
 
 mqtt_client.on_connect    = on_mqtt_connect
 mqtt_client.on_disconnect = on_mqtt_disconnect
@@ -256,13 +260,21 @@ def on_ws_connect():
 
 @app.get("/mqtt_diag")
 def mqtt_diag():
+    now = int(time.time())
+    alive = mqtt_client.is_connected() or (now - (last_rx_ts or 0) <= 20)
     return jsonify({
         "configured_host": MQTT_HOST,
         "connect_host": CONNECT_HOST,
         "connect_port": CONNECT_PORT,
-        "transport": MQTT_TRANSPORT,
-        "path": MQTT_WS_PATH if MQTT_TRANSPORT != "tcp" else "-",
-        "tls": MQTT_USE_TLS,
+        "transport": os.getenv("MQTT_TRANSPORT","tcp"),
+        "path": os.getenv("MQTT_WS_PATH","/mqtt"),
+        "tls": os.getenv("MQTT_USE_TLS","false").lower() == "true",
         "username": MQTT_USERNAME or "",
-        "connected": mqtt_client.is_connected()
+        "connected": bool(alive),
+        "last_rx_age_s": (now - (last_rx_ts or 0))
     })
+
+
+@app.get("/last")
+def last():
+    return jsonify(last_data or {})

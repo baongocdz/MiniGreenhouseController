@@ -142,10 +142,27 @@
     const fmt = (v, d=1) => isNum(v) ? v.toFixed(d) : '--';
 
     // ------- socket
-    // const socket = io();
-    const socket = io({ transports: ["websocket"] });
+    const socket = io();
+    // const socket = io({ transports: ["websocket"] });
     const conn = byId('connState');
     socket.on('connect', ()=>{ conn.textContent='● Online'; conn.classList.add('on'); });
+    (async () => {
+  try {
+    const res = await fetch('/last');
+    const d = await res.json();
+    if (d && (d.temp !== undefined)) {
+      byId('t').textContent = fmt(Number(d.temp)) + '°C';
+      byId('h').textContent = fmt(Number(d.hum)) + '%';
+      const on = !!d.fan;
+      const f = byId('f');
+      f.textContent = on ? 'ON' : 'OFF';
+      f.classList.toggle('on', on);
+      f.classList.toggle('off', !on);
+      f.classList.add('value');
+    }
+  } catch {}
+})();
+
     socket.on('disconnect', ()=>{ conn.textContent='● Offline'; conn.classList.remove('on'); });
 
     socket.on('update', d=>{

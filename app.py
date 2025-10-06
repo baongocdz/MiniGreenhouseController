@@ -104,8 +104,25 @@ def vacuum_and_ttl(days=TTL_DAYS):
     except Exception as e:
         print("[DB] TTL/VACUUM error:", e)
 
-# ------------------ MQTT ------------------
-mqtt_client = mqtt.Client(client_id=os.getenv("MQTT_CLIENT_ID", f"greenhouse_web_{now_ts()}"))
+# ------------------ MQTT (WS/TCP selectable) ------------------
+MQTT_TRANSPORT = os.getenv("MQTT_TRANSPORT", "tcp").lower()   # "tcp" | "websockets" | "ws" | "wss"
+MQTT_USE_TLS   = os.getenv("MQTT_USE_TLS", "false").lower() == "true"
+MQTT_WS_PATH   = os.getenv("MQTT_WS_PATH", "/mqtt")            # hầu hết broker WS dùng "/mqtt"
+
+def make_client():
+    cid = os.getenv("MQTT_CLIENT_ID", f"greenhouse_web_{int(time.time())}")
+    if MQTT_TRANSPORT in ("websockets", "ws", "wss"):
+        c = mqtt.Client(client_id=cid, transport="websockets")
+        c.ws_set_options(path=MQTT_WS_PATH or "/mqtt")
+        if MQTT_USE_TLS or MQTT_TRANSPORT == "wss":
+            c.tls_set()  # WSS
+        # Với WS/WSS nên dùng hostname để SNI hoạt động
+        return c, MQTT_HOST, MQTT_PORT
+    else:
+        # TCP thường: dùng IPv4 để tránh IPv6 issues
+        return mqtt.Client(client_id=cid), MQTT_HOST_IP, MQTT_PORT
+
+mqtt_client, CONNECT_HOST, CONNECT_PORT = make_client()
 
 def on_mqtt_log(client, userdata, level, buf):
     print("[MQTT-LOG]", buf)
@@ -132,10 +149,12 @@ mqtt_client.on_connect = on_mqtt_connect
 mqtt_client.on_message = on_mqtt_message
 mqtt_client.on_log     = on_mqtt_log
 
+_connecting_lock = threading.Lock()
 def connect_mqtt():
-    print(f"[MQTT] Connecting to {MQTT_HOST} ({MQTT_HOST_IP}):{MQTT_PORT} ...")
-    mqtt_client.connect(MQTT_HOST_IP, MQTT_PORT, keepalive=30)
-    mqtt_client.loop_start()
+    with _connecting_lock:
+        print(f"[MQTT] Connecting via {MQTT_TRANSPORT.upper()} to {CONNECT_HOST}:{CONNECT_PORT} path={MQTT_WS_PATH if MQTT_TRANSPORT!='tcp' else '-'} TLS={MQTT_USE_TLS}")
+        mqtt_client.connect(CONNECT_HOST, CONNECT_PORT, keepalive=30)
+        mqtt_client.loop_start()
 
 def mqtt_watch():
     while True:
@@ -148,7 +167,6 @@ def mqtt_watch():
 
 connect_mqtt()
 threading.Thread(target=mqtt_watch, daemon=True).start()
-threading.Thread(target=lambda: (time.sleep(10), vacuum_and_ttl()), daemon=True).start()
 
 # ------------------ Routes ------------------
 @app.route("/")

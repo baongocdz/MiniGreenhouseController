@@ -3,22 +3,26 @@ from __future__ import annotations
 
 import os, json, time, sqlite3, threading, socket
 from datetime import datetime, timezone
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO
 import paho.mqtt.client as mqtt
 
 # ------------------ CONFIG ------------------
-MQTT_HOST = os.getenv("MQTT_HOST", "test.mosquitto.org")   # đổi trong Render nếu cần
+MQTT_HOST = os.getenv("MQTT_HOST", "test.mosquitto.org")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 TOPIC_DATA = os.getenv("TOPIC_DATA", "greenhouse/data")
 TOPIC_CMD  = os.getenv("TOPIC_CMD",  "greenhouse/cmd")
 DB_PATH    = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__) or ".", "greenhouse.db"))
 TTL_DAYS   = int(os.getenv("TTL_DAYS", "14"))
 
+# NEW: auth từ ENV (EMQX Cloud cần)
+MQTT_USERNAME = os.getenv("MQTT_USERNAME")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
+
 def resolve_ipv4(host: str) -> str:
     try:
         for fam, _, _, _, sockaddr in socket.getaddrinfo(host, None):
-            if fam == socket.AF_INET:  # IPv4
+            if fam == socket.AF_INET:
                 return sockaddr[0]
     except Exception:
         pass
@@ -105,32 +109,36 @@ def vacuum_and_ttl(days=TTL_DAYS):
         print("[DB] TTL/VACUUM error:", e)
 
 # ------------------ MQTT (WS/TCP selectable + TLS + Origin header) ------------------
-MQTT_TRANSPORT = os.getenv("MQTT_TRANSPORT", "tcp").lower()   # tcp|websockets|ws|wss
-MQTT_USE_TLS   = os.getenv("MQTT_USE_TLS", "false").lower() == "true"
-MQTT_WS_PATH   = os.getenv("MQTT_WS_PATH", "/mqtt")
-MQTT_TLS_INSECURE = os.getenv("MQTT_TLS_INSECURE", "false").lower() == "true"
-WS_ORIGIN      = os.getenv("WS_ORIGIN", "")  # ví dụ: https://minigreenhousecontroller-1.onrender.com
+MQTT_TRANSPORT     = os.getenv("MQTT_TRANSPORT", "tcp").lower()   # tcp|websockets|ws|wss
+MQTT_USE_TLS       = os.getenv("MQTT_USE_TLS", "false").lower() == "true"
+MQTT_WS_PATH       = os.getenv("MQTT_WS_PATH", "/mqtt")
+MQTT_TLS_INSECURE  = os.getenv("MQTT_TLS_INSECURE", "false").lower() == "true"
+WS_ORIGIN          = os.getenv("WS_ORIGIN", "")  # ví dụ: https://<service>.onrender.com
 
 def make_client():
     cid = os.getenv("MQTT_CLIENT_ID", f"greenhouse_web_{int(time.time())}")
     if MQTT_TRANSPORT in ("websockets", "ws", "wss"):
-        c = mqtt.Client(client_id=cid, transport="websockets")  # MQTT v3.1.1
-        # Thêm Origin header cho WS phía public broker/proxy khó tính
+        c = mqtt.Client(client_id=cid, transport="websockets")
         headers = {}
         if WS_ORIGIN:
             headers["Origin"] = WS_ORIGIN
         c.ws_set_options(path=MQTT_WS_PATH or "/mqtt", headers=headers)
         if MQTT_USE_TLS or MQTT_TRANSPORT == "wss":
-            c.tls_set()                         # dùng CA hệ thống
+            c.tls_set()
             if MQTT_TLS_INSECURE:
-                c.tls_insecure_set(True)        # chỉ bật nếu gặp lỗi verify cert
-        # WS/WSS: dùng hostname để SNI/Host header đúng
+                c.tls_insecure_set(True)
+        # WS/WSS: dùng hostname để SNI/Host chính xác
         return c, MQTT_HOST, MQTT_PORT
     else:
         # TCP: ưu tiên IPv4 để tránh IPv6
         return mqtt.Client(client_id=cid), MQTT_HOST_IP, MQTT_PORT
 
 mqtt_client, CONNECT_HOST, CONNECT_PORT = make_client()
+
+# NEW: gắn username/password trước khi connect
+if MQTT_USERNAME:
+    mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD or "")
+    print(f"[MQTT] Auth user={MQTT_USERNAME!r}")
 
 def on_mqtt_log(client, userdata, level, buf):
     print("[MQTT-LOG]", buf)
@@ -140,6 +148,10 @@ def on_mqtt_connect(client, userdata, flags, rc):
     if rc == 0:
         client.subscribe(TOPIC_DATA, qos=0)
         print(f"[MQTT] Subscribed {TOPIC_DATA}")
+
+def on_mqtt_disconnect(client, userdata, rc):
+    # rc != 0 là disconnect bất thường
+    print(f"[MQTT] Disconnected rc={rc}")
 
 def on_mqtt_message(client, userdata, msg):
     global last_data, fan_state
@@ -153,15 +165,17 @@ def on_mqtt_message(client, userdata, msg):
     save_row(t, h, f)
     socketio.emit("update", last_data)
 
-mqtt_client.on_connect = on_mqtt_connect
-mqtt_client.on_message = on_mqtt_message
-mqtt_client.on_log     = on_mqtt_log
+mqtt_client.on_connect    = on_mqtt_connect
+mqtt_client.on_disconnect = on_mqtt_disconnect
+mqtt_client.on_message    = on_mqtt_message
+mqtt_client.on_log        = on_mqtt_log
 mqtt_client.reconnect_delay_set(min_delay=2, max_delay=10)
 
 _connecting_lock = threading.Lock()
 def connect_mqtt():
     with _connecting_lock:
-        print(f"[MQTT] Connecting via {MQTT_TRANSPORT.upper()} to {CONNECT_HOST}:{CONNECT_PORT} path={MQTT_WS_PATH if MQTT_TRANSPORT!='tcp' else '-'} TLS={MQTT_USE_TLS} ORIGIN={WS_ORIGIN or '-'}")
+        print(f"[MQTT] Connecting via {MQTT_TRANSPORT.upper()} to {CONNECT_HOST}:{CONNECT_PORT} "
+              f"path={MQTT_WS_PATH if MQTT_TRANSPORT!='tcp' else '-'} TLS={MQTT_USE_TLS} ORIGIN={WS_ORIGIN or '-'}")
         mqtt_client.connect(CONNECT_HOST, CONNECT_PORT, keepalive=30)
         mqtt_client.loop_start()
 
@@ -177,10 +191,10 @@ def mqtt_watch():
 connect_mqtt()
 threading.Thread(target=mqtt_watch, daemon=True).start()
 
-
 # ------------------ Routes ------------------
 @app.route("/")
-def index(): return render_template("dashboard.html")
+def index():
+    return render_template("dashboard.html")
 
 @app.get("/history")
 def history_api():
@@ -240,14 +254,15 @@ def on_ws_connect():
     socketio.emit("threshold", threshold_temp, to=sid)
     socketio.emit("schedule", schedule_cfg, to=sid)
 
-# (no __main__ block; Render runs via gunicorn)
 @app.get("/mqtt_diag")
 def mqtt_diag():
     return jsonify({
-        "host": MQTT_HOST,
-        "port": MQTT_PORT,
-        "transport": os.getenv("MQTT_TRANSPORT","tcp"),
-        "path": os.getenv("MQTT_WS_PATH","/mqtt"),
-        "tls": os.getenv("MQTT_USE_TLS","false"),
+        "configured_host": MQTT_HOST,
+        "connect_host": CONNECT_HOST,
+        "connect_port": CONNECT_PORT,
+        "transport": MQTT_TRANSPORT,
+        "path": MQTT_WS_PATH if MQTT_TRANSPORT != "tcp" else "-",
+        "tls": MQTT_USE_TLS,
+        "username": MQTT_USERNAME or "",
         "connected": mqtt_client.is_connected()
     })

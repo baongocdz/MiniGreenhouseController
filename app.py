@@ -1,7 +1,3 @@
-import eventlet
-eventlet.monkey_patch()
-
-# ================= Mini Greenhouse on Render (eventlet) =================
 import os, json, time, sqlite3, threading, socket
 from datetime import datetime, timezone
 from flask import Flask, render_template, request, jsonify, send_file
@@ -25,7 +21,7 @@ def resolve_ipv4(host: str) -> str:
 MQTT_HOST_IP = resolve_ipv4(MQTT_HOST)
 
 app = Flask(__name__)
-socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
+socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
 # ------------------ STATE ------------------
 state_lock = threading.Lock()

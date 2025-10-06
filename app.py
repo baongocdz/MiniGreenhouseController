@@ -159,15 +159,24 @@ def on_mqtt_message(client, userdata, msg):
     global last_data, fan_state, last_rx_ts
     try:
         data = json.loads(msg.payload.decode("utf-8"))
-        t = float(data.get("temp")); h = float(data.get("hum")); f = 1 if int(data.get("fan", 0)) else 0
+        t = float(data.get("temp"))
+        h = float(data.get("hum"))
+        f = 1 if int(data.get("fan", 0)) else 0
     except Exception as e:
-        print("[MQTT] Parse error:", e, msg.payload[:100]); return
+        print("[MQTT] Parse error:", e, msg.payload[:100])
+        return
+
     fan_state = f
     last_data = {"temp": t, "hum": h, "fan": f}
-    last_rx_ts = int(time.time())                 # <= ghi nhận thời điểm có gói về
+    last_rx_ts = int(time.time())
     save_row(t, h, f)
-    socketio.emit("update")  # <= broadcast rõ ràng
-    print(f"[DATA] temp={t}, hum={h}, fan={f}")   # tiện theo dõi log
+
+    # >>> FIX quan trọng: gửi payload cho client
+    socketio.emit("update", last_data)
+
+    print(f"[DATA] temp={t}, hum={h}, fan={f}  -> emitted to clients")
+
+
 
 mqtt_client.on_connect    = on_mqtt_connect
 mqtt_client.on_disconnect = on_mqtt_disconnect
@@ -253,10 +262,13 @@ def set_schedule():
 def on_ws_connect():
     sid = request.sid
     print("[WS] client", sid, "connected")
-    if last_data: socketio.emit("update", last_data, to=sid)
+    if last_data:
+        print("[WS] push last_data to", sid, last_data)
+        socketio.emit("update", last_data, to=sid)
     socketio.emit("mode", mode, to=sid)
     socketio.emit("threshold", threshold_temp, to=sid)
     socketio.emit("schedule", schedule_cfg, to=sid)
+
 
 @app.get("/mqtt_diag")
 def mqtt_diag():

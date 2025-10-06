@@ -85,164 +85,147 @@
     </div>
   </section>
 
-  <section class="panel controls">
-    <h2><i class="fa-solid fa-sliders"></i> Controls</h2>
+<script>
+  // ------- helpers
+  const byId = id => document.getElementById(id);
+  const isNum = v => typeof v === 'number' && Number.isFinite(v);
+  const fmt = (v, d=1) => isNum(v) ? v.toFixed(d) : '--';
+  const log = (...a) => console.log('%c[UI]', 'color:#0ea5e9;font-weight:700', ...a);
 
-    <div class="btn-group mode">
-      <button id="btnAuto" class="btn active" onclick="setMode('auto')">Auto</button>
-      <button id="btnManual" class="btn" onclick="setMode('manual')">Manual</button>
-      <button id="btnSchedule" class="btn" onclick="setMode('schedule')">Schedule</button>
-    </div>
+  // ------- socket
+  const socket = io(); // để mặc định: có thể fallback polling nếu WS bị chặn proxy
+  const conn = byId('connState');
 
-    <div id="manualControl" class="subgroup hidden">
-      <h3><i class="fa-solid fa-fan"></i> Manual Fan</h3>
-      <div class="btn-group">
-        <button class="btn ok"  onclick="manualFan(1)">Turn ON</button>
-        <button class="btn err" onclick="manualFan(0)">Turn OFF</button>
-      </div>
-    </div>
+  socket.on('connect', ()=>{
+    log('connect', {id: socket.id});
+    conn.textContent='● Online';
+    conn.classList.add('on');
+  });
 
-    <div class="subgroup">
-      <h3><i class="fa-solid fa-temperature-arrow-up"></i> Temperature to turn fan ON</h3>
-      <div class="inline">
-        <label for="th">Fan ON threshold (°C)</label>
-        <input id="th" type="number" min="10" max="50" step="0.5" value="30" placeholder="30.0" title="Temperature at which fan turns ON">
-        <button class="btn small" onclick="setThreshold()">Apply</button>
-      </div>
-    </div>
+  socket.on('connect_error', (err)=>{
+    log('connect_error', err?.message || err);
+  });
 
-    <div id="scheduleBox" class="subgroup hidden">
-      <h3><i class="fa-regular fa-clock"></i> Schedule</h3>
-      <div class="inline">
-        <label for="onMin">ON (min)</label>
-        <input id="onMin" type="number" min="1" max="120" value="5" placeholder="5" title="Minutes ON">
-        <label for="offMin">OFF (min)</label>
-        <input id="offMin" type="number" min="1" max="240" value="10" placeholder="10" title="Minutes OFF">
-        <button class="btn small" onclick="setSchedule()">Save</button>
-      </div>
-    </div>
-  </section>
+  socket.on('reconnect_attempt', n => log('reconnect_attempt', n));
+  socket.on('reconnect', n => log('reconnect', n));
+  socket.on('disconnect', (r)=>{
+    log('disconnect', r);
+    conn.textContent='● Offline';
+    conn.classList.remove('on');
+  });
 
-  <section class="panel chart-area">
-    <h2><i class="fa-solid fa-chart-area"></i> Environment History</h2>
-    <div class="btn-group switcher">
-      <button class="btn small active" data-range="day">24h</button>
-      <button class="btn small" data-range="week">7d</button>
-      <button class="btn small" data-range="month">30d</button>
-    </div>
-    <canvas id="chart"></canvas>
-  </section>
-
-  <footer class="footer">🌿 Mini Greenhouse – Realtime Monitoring</footer>
-
-  <script>
-    // ------- helpers
-    const byId = id => document.getElementById(id);
-    const isNum = v => typeof v === 'number' && Number.isFinite(v);
-    const fmt = (v, d=1) => isNum(v) ? v.toFixed(d) : '--';
-
-    // ------- socket
-    const socket = io();
-    // const socket = io({ transports: ["websocket"] });
-    const conn = byId('connState');
-    socket.on('connect', ()=>{ conn.textContent='● Online'; conn.classList.add('on'); });
-    (async () => {
-  try {
-    const res = await fetch('/last');
-    const d = await res.json();
-    if (d && (d.temp !== undefined)) {
-      byId('t').textContent = fmt(Number(d.temp)) + '°C';
-      byId('h').textContent = fmt(Number(d.hum)) + '%';
-      const on = !!d.fan;
-      const f = byId('f');
-      f.textContent = on ? 'ON' : 'OFF';
-      f.classList.toggle('on', on);
-      f.classList.toggle('off', !on);
-      f.classList.add('value');
-    }
-  } catch {}
-})();
-
-    socket.on('disconnect', ()=>{ conn.textContent='● Offline'; conn.classList.remove('on'); });
-
-    socket.on('update', d=>{
-      byId('t').textContent = fmt(Number(d.temp)) + '°C';
-      byId('h').textContent = fmt(Number(d.hum)) + '%';
-
-      const f = byId('f');
-      const on = !!d.fan;
-      f.textContent = on ? 'ON' : 'OFF';
-      f.classList.toggle('on', on);
-      f.classList.toggle('off', !on);
-      // giữ class "value"
-      f.classList.add('value');
-    });
-
-    socket.on('mode', m=>{
-      ['btnAuto','btnManual','btnSchedule'].forEach(id=>byId(id).classList.remove('active'));
-      const btnId = 'btn' + m.charAt(0).toUpperCase() + m.slice(1);
-      if(byId(btnId)) byId(btnId).classList.add('active');
-
-      byId('modeBadge').textContent = 'Mode: ' + m;
-      byId('manualControl').classList.toggle('hidden', m !== 'manual');
-      byId('scheduleBox').classList.toggle('hidden', m !== 'schedule');
-    });
-
-    socket.on('threshold', v=>{
-      const n = Number(v);
-      if(isNum(n)) byId('th').value = n.toFixed(1);
-    });
-
-    socket.on('schedule', s=>{
-      if(!s) return;
-      if(isNum(Number(s.on_min)))  byId('onMin').value  = s.on_min;
-      if(isNum(Number(s.off_min))) byId('offMin').value = s.off_min;
-    });
-
-    // ------- REST actions
-    const post = (url, body)=>fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    async function setMode(m){ await post('/control',{mode:m}); }
-    async function manualFan(s){ await post('/control',{fan:s}); }
-    async function setThreshold(){
-      const v = Number(byId('th').value);
-      if(isNum(v)) await post('/threshold',{temp:v});
-    }
-    async function setSchedule(){
-      const on  = Number(byId('onMin').value || 5);
-      const off = Number(byId('offMin').value || 10);
-      await post('/schedule',{on_min:on, off_min:off});
-    }
-
-    // ------- chart
-    const ctx = byId('chart');
-    const chart = new Chart(ctx,{
-      type:'line',
-      data:{labels:[],datasets:[
-        {label:'Temperature', data:[], borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.15)', fill:true, tension:.35, pointRadius:2},
-        {label:'Humidity',    data:[], borderColor:'#0ea5e9', backgroundColor:'rgba(14,165,233,.15)', fill:true, tension:.35, pointRadius:2, yAxisID:'y1'}
-      ]},
-      options:{
-        responsive:true, maintainAspectRatio:false, interaction:{mode:'index', intersect:false},
-        scales:{
-          x:{ticks:{color:'#64748b'}, grid:{color:'rgba(0,0,0,.05)'}},
-          y:{title:{display:true,text:'°C'}, ticks:{color:'#64748b'}, grid:{color:'rgba(0,0,0,.05)'}},
-          y1:{position:'right', title:{display:true,text:'%'}, ticks:{color:'#64748b'}, grid:{drawOnChartArea:false}}
-        },
-        plugins:{legend:{labels:{color:'#1f2937', font:{size:12}}}, tooltip:{backgroundColor:'#0f172a',titleColor:'#fff',bodyColor:'#fff'}}
+  // kéo last snapshot lúc mới vào
+  (async () => {
+    try {
+      const res = await fetch('/last');
+      const d = await res.json();
+      log('GET /last ->', d);
+      if (d && (d.temp !== undefined)) {
+        byId('t').textContent = fmt(Number(d.temp)) + '°C';
+        byId('h').textContent = fmt(Number(d.hum)) + '%';
+        const on = !!d.fan;
+        const f = byId('f');
+        f.textContent = on ? 'ON' : 'OFF';
+        f.classList.toggle('on', on);
+        f.classList.toggle('off', !on);
+        f.classList.add('value');
       }
-    });
+    } catch (e) {
+      log('GET /last error', e);
+    }
+  })();
 
-    async function loadRange(r){
-      document.querySelectorAll('.switcher .btn').forEach(b=>b.classList.toggle('active', b.dataset.range===r));
+  // nhận realtime
+  socket.on('update', d=>{
+    log('event:update', d);
+    if (!d) return;
+    byId('t').textContent = fmt(Number(d.temp)) + '°C';
+    byId('h').textContent = fmt(Number(d.hum)) + '%';
+
+    const f = byId('f');
+    const on = !!d.fan;
+    f.textContent = on ? 'ON' : 'OFF';
+    f.classList.toggle('on', on);
+    f.classList.toggle('off', !on);
+    f.classList.add('value'); // giữ class
+  });
+
+  socket.on('mode', m=>{
+    log('event:mode', m);
+    ['btnAuto','btnManual','btnSchedule'].forEach(id=>byId(id).classList.remove('active'));
+    const btnId = 'btn' + m.charAt(0).toUpperCase() + m.slice(1);
+    if(byId(btnId)) byId(btnId).classList.add('active');
+
+    byId('modeBadge').textContent = 'Mode: ' + m;
+    byId('manualControl').classList.toggle('hidden', m !== 'manual');
+    byId('scheduleBox').classList.toggle('hidden', m !== 'schedule');
+  });
+
+  socket.on('threshold', v=>{
+    log('event:threshold', v);
+    const n = Number(v);
+    if(isNum(n)) byId('th').value = n.toFixed(1);
+  });
+
+  socket.on('schedule', s=>{
+    log('event:schedule', s);
+    if(!s) return;
+    if(isNum(Number(s.on_min)))  byId('onMin').value  = s.on_min;
+    if(isNum(Number(s.off_min))) byId('offMin').value = s.off_min;
+  });
+
+  // ------- REST actions
+  const post = (url, body)=>{
+    log('POST', url, body);
+    return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  };
+  async function setMode(m){ await post('/control',{mode:m}); }
+  async function manualFan(s){ await post('/control',{fan:s}); }
+  async function setThreshold(){
+    const v = Number(byId('th').value);
+    if(isNum(v)) await post('/threshold',{temp:v});
+  }
+  async function setSchedule(){
+    const on  = Number(byId('onMin').value || 5);
+    const off = Number(byId('offMin').value || 10);
+    await post('/schedule',{on_min:on, off_min:off});
+  }
+
+  // ------- chart
+  const ctx = byId('chart');
+  const chart = new Chart(ctx,{
+    type:'line',
+    data:{labels:[],datasets:[
+      {label:'Temperature', data:[], borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.15)', fill:true, tension:.35, pointRadius:2},
+      {label:'Humidity',    data:[], borderColor:'#0ea5e9', backgroundColor:'rgba(14,165,233,.15)', fill:true, tension:.35, pointRadius:2, yAxisID:'y1'}
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, interaction:{mode:'index', intersect:false},
+      scales:{
+        x:{ticks:{color:'#64748b'}, grid:{color:'rgba(0,0,0,.05)'}},
+        y:{title:{display:true,text:'°C'}, ticks:{color:'#64748b'}, grid:{color:'rgba(0,0,0,.05)'}},
+        y1:{position:'right', title:{display:true,text:'%'}, ticks:{color:'#64748b'}, grid:{drawOnChartArea:false}}
+      },
+      plugins:{legend:{labels:{color:'#1f2937', font:{size:12}}}, tooltip:{backgroundColor:'#0f172a',titleColor:'#fff',bodyColor:'#fff'}}
+    }
+  });
+
+  async function loadRange(r){
+    document.querySelectorAll('.switcher .btn').forEach(b=>b.classList.toggle('active', b.dataset.range===r));
+    try{
       const res = await fetch('/history?range='+r);
       const data = await res.json();
+      log('GET /history?range='+r, {points: (data?.time||[]).length});
       chart.data.labels = Array.isArray(data.time) ? data.time : [];
       chart.data.datasets[0].data = Array.isArray(data.temp) ? data.temp : [];
       chart.data.datasets[1].data = Array.isArray(data.hum)  ? data.hum  : [];
       chart.update();
+    }catch(e){
+      log('history error', e);
     }
-    document.querySelectorAll('.switcher .btn').forEach(b=>b.onclick=()=>loadRange(b.dataset.range));
-    loadRange('day');
-  </script>
+  }
+  document.querySelectorAll('.switcher .btn').forEach(b=>b.onclick=()=>loadRange(b.dataset.range));
+  loadRange('day');
+</script>
 </body>
 </html>

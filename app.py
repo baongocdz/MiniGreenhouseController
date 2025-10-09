@@ -154,7 +154,8 @@ def on_mqtt_connect(client, userdata, flags, rc):
     print(f"[MQTT] CONNACK rc={rc}")
     if rc == 0:
         client.subscribe(TOPIC_DATA, qos=0)
-        print(f"[MQTT] Subscribed {TOPIC_DATA}")
+        client.subscribe(TOPIC_CMD,  qos=0)   # <— thêm dòng này
+        print(f"[MQTT] Subscribed {TOPIC_DATA} & {TOPIC_CMD}")
 
 def on_mqtt_disconnect(client, userdata, rc):
     # rc != 0 là disconnect bất thường
@@ -162,6 +163,17 @@ def on_mqtt_disconnect(client, userdata, rc):
 
 def on_mqtt_message(client, userdata, msg):
     global last_data, fan_state, last_rx_ts
+
+    if msg.topic == TOPIC_CMD:
+        try:
+            cmd = json.loads(msg.payload.decode("utf-8"))
+        except Exception as e:
+            print("[CMD-ECHO] parse err:", e, msg.payload[:100]); return
+        print("[CMD-ECHO] from broker:", cmd)
+        socketio.emit("cmd_echo", cmd)
+        return
+
+    # ---- DATA path (greenhouse/data)
     try:
         data = json.loads(msg.payload.decode("utf-8"))
         t = float(data.get("temp"))
@@ -176,10 +188,9 @@ def on_mqtt_message(client, userdata, msg):
     last_rx_ts = int(time.time())
     save_row(t, h, f)
 
-    # >>> FIX quan trọng: gửi payload cho client
-    socketio.emit("update", last_data)
-
+    socketio.emit("update", last_data)  # phát cho mọi client
     print(f"[DATA] temp={t}, hum={h}, fan={f}  -> emitted to clients")
+
 
 
 
@@ -219,7 +230,9 @@ def history_api():
     return jsonify(query_aggregated(request.args.get("range", "day")))
 
 def mqtt_publish(obj: dict):
-    mqtt_client.publish(TOPIC_CMD, json.dumps(obj, ensure_ascii=False), qos=0, retain=False)
+    payload = json.dumps(obj, ensure_ascii=False)
+    print("[CMD-PUB]", payload)
+    mqtt_client.publish(TOPIC_CMD, payload, qos=1, retain=True)  # <— retain + qos=1
 
 @app.post("/control")
 def control():
@@ -229,16 +242,21 @@ def control():
         if "mode" in body:
             mode = str(body["mode"]).lower()
             if mode not in ("auto","manual","schedule"): mode = "auto"
-            socketio.emit("mode", mode); mqtt_publish({"mode": mode})
+            socketio.emit("mode", mode)
+            mqtt_publish({"mode": mode})
             print(f"[CMD] mode -> {mode}")
+
         if "fan" in body:
-            if mode != "manual":
-                mode = "manual"; socketio.emit("mode", mode); mqtt_publish({"mode":"manual"})
-                print("[CMD] force manual before fan")
             fan_state = 1 if int(body["fan"]) else 0
-            mqtt_publish({"fan": bool(fan_state)})
+            # GỘP: đảm bảo ESP nhận cùng lúc "manual"+"fan"
+            if mode != "manual":
+                mode = "manual"
+                socketio.emit("mode", mode)
+            mqtt_publish({"mode":"manual", "fan": bool(fan_state)})
             print(f"[CMD] fan -> {fan_state}")
+
     return jsonify({"ok": True, "mode": mode, "fan": fan_state})
+
 
 @app.post("/threshold")
 def set_threshold():
@@ -275,6 +293,9 @@ def on_ws_connect():
                     last_data = {"temp": row[0], "hum": row[1], "fan": row[2]}
         except Exception as e:
             print("[WS] DB read fail:", e)
+
+    if last_data:
+        socketio.emit("update", last_data, to=sid)  # <— thêm dòng này
 
     socketio.emit("mode", mode, to=sid)
     socketio.emit("threshold", threshold_temp, to=sid)

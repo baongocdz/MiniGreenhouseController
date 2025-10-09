@@ -266,10 +266,16 @@ def set_schedule():
 @socketio.on("connect")
 def on_ws_connect():
     sid = request.sid
-    print("[WS] client", sid, "connected")
-    if last_data:
-        print("[WS] push last_data to", sid, last_data)
-        socketio.emit("update", last_data, to=sid)
+    global last_data
+    if not last_data:
+        try:
+            with db_conn() as conn:
+                row = conn.execute("SELECT temp, hum, fan FROM logs ORDER BY id DESC LIMIT 1").fetchone()
+                if row:
+                    last_data = {"temp": row[0], "hum": row[1], "fan": row[2]}
+        except Exception as e:
+            print("[WS] DB read fail:", e)
+
     socketio.emit("mode", mode, to=sid)
     socketio.emit("threshold", threshold_temp, to=sid)
     socketio.emit("schedule", schedule_cfg, to=sid)

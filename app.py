@@ -1,4 +1,6 @@
-# app.py  — Flask + Flask-SocketIO(threading) + paho-mqtt + SQLite (Render friendly)
+import eventlet
+eventlet.monkey_patch()
+
 from __future__ import annotations
 
 import os, json, time, sqlite3, threading, socket
@@ -33,7 +35,8 @@ MQTT_HOST_IP = resolve_ipv4(MQTT_HOST)
 
 # ------------------ APP/WS ------------------
 app = Flask(__name__)
-socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
+# socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*")  # bỏ async_mode
 
 # ------------------ STATE ------------------
 state_lock = threading.Lock()

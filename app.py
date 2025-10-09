@@ -1,7 +1,9 @@
+# 1) __future__ luôn đứng đầu
+from __future__ import annotations
+
+# 2) (Eventlet mode) — đặt ngay sau future import
 import eventlet
 eventlet.monkey_patch()
-
-from __future__ import annotations
 
 import os, json, time, sqlite3, threading, socket
 from datetime import datetime, timezone
